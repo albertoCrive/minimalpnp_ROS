@@ -20,4 +20,4 @@ ORB_SLAM_INSTALL_ROOT=${ORB_SLAM_ROOT}  gnome-terminal --disable-factory -e "${C
 sleep 20
 gnome-terminal --disable-factory -e '/bin/bash -c "cd ~/catkin_ws && source devel/setup.bash && rosrun minimalpnp mainMinimalpnp" ' &
 
-trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
+trap 'kill $(jobs -pr) && clear' SIGINT SIGTERM EXIT

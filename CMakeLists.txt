@@ -37,29 +37,52 @@ FIND_PACKAGE(PoseEstimator REQUIRED)
 include_directories(${PoseEstimator_INCLUDE_DIRS})
 link_directories(${PoseEstimator_LIB_DIR})
 
+######## array fire dependencies
+### TODO : this is a dirty workaround to solve for transitive dependencies.
+# some (ex.cuda) are exported with absolute paths inPoseEstimatorConfig.cmake, some others(arrayfire) are not and I have to find the package. weird.
 
-if (";${PoseEstimator_LIBS};" MATCHES ";afcuda;")
-  MESSAGE(STATUS "PoseEstimator depends on Array fire and cuda. Will try to include them :  ${PoseEstimator_LIBS}")
-  set(USE_AF 1)
-else ()
-  MESSAGE(STATUS "PoseEstimator does NOT depend on Array fire nor cuda  : ${PoseEstimator_LIBS}")
-  set(USE_AF 0)
-endif()
-
+set(USE_AF_CUDA 0)
+set(USE_AF_CPU 0)
 set(AF_LIBS "")
 
-IF(USE_AF)
-  FIND_PACKAGE(CUDA REQUIRED)
-  FIND_PACKAGE(ArrayFire REQUIRED)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCNN_FAST_TEST")
-  MESSAGE(STATUS "Compiling with fast array fire CNN testing!!!")
-  include_directories(${ArrayFire_INCLUDE_DIRS})
-  FIND_LIBRARY(CUDA_NVVM_LIBRARY NAMES "nvvm" PATH_SUFFIXES "nvvm/lib64" "nvvm/lib" PATHS ${CUDA_TOOLKIT_ROOT_DIR} DOC "CUDA NVVM Library")
-  MESSAGE(STATUS "CUDA-ARRAYFIRE ENABLED.")
-  set(AF_LIBS ${ArrayFire_CUDA_LIBRARIES} ${CUDA_CUBLAS_LIBRARIES};${CUDA_LIBRARIES};${CUDA_cusolver_LIBRARY};${CUDA_CUFFT_LIBRARIES};${CUDA_NVVM_LIBRARY};${CUDA_CUDA_LIBRARY};${ARRAYFIRE_LIBRARIES};)
+if(";${PoseEstimator_LIBS};" MATCHES ";afcuda;")
+  MESSAGE(STATUS "PoseEstimator depends on Array fire on cuda.  ${PoseEstimator_LIBS}")
+  set(USE_AF_CUDA 1)
+elseif(";${PoseEstimator_LIBS};" MATCHES ";afcpu;")
+  MESSAGE(STATUS "PoseEstimator does depend on Array on cpu  : ${PoseEstimator_LIBS}")
+  set(USE_AF_CPU 1)
 else()
-  MESSAGE(STATUS "ATTENTION CUDA-ARRAY FIRE NOT ENABLED ! !! ")
+  MESSAGE(STATUS "PoseEstimator does NOT depend on Array fire nor cuda  : ${PoseEstimator_LIBS}")
 endif()
+
+if(USE_AF_CUDA OR USE_AF_CPU)
+  FIND_PACKAGE(ArrayFire REQUIRED)
+  include_directories(${ArrayFire_INCLUDE_DIRS})
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCNN_FAST_TEST")
+endif()
+
+if(USE_AF_CUDA)
+  SET(USE_AF_CPU, OFF)
+  FIND_PACKAGE(CUDA)
+if (NOT (CUDA_FOUND OR ArrayFire_FOUND OR ArrayFire_CUDA_FOUND) )
+   MESSAGE(STATUS "I did not found one of CUDA, Arrayfire, Arrayfire_cuda : ${CUDA_FOUND} ${ArrayFire_FOUND} ${ArrayFire_CUDA_FOUND}. Will try to revert to arrayfire CPU")
+   SET(USE_AF_CPU, ON)
+else()
+   MESSAGE(STATUS "Compiling with fast array fire CNN testing!!!")
+   FIND_LIBRARY(CUDA_NVVM_LIBRARY
+              NAMES "nvvm"
+              PATH_SUFFIXES "nvvm/lib64" "nvvm/lib"
+              PATHS ${CUDA_TOOLKIT_ROOT_DIR}
+              DOC "CUDA NVVM Library")
+    MESSAGE(STATUS "CUDA-ARRAYFIRE ENABLED.")
+    set(AF_LIBS ${ArrayFire_CUDA_LIBRARIES} ${CUDA_CUBLAS_LIBRARIES};${CUDA_LIBRARIES};${CUDA_cusolver_LIBRARY};${CUDA_CUFFT_LIBRARIES};${CUDA_NVVM_LIBRARY};${CUDA_CUDA_LIBRARY};)
+endif()
+endif()
+
+IF(USE_AF_CPU)
+    set(AF_LIBS ${ArrayFire_CPU_LIBRARIES})
+ENDIF()
+
 
 set(POSE_ESTIMATOR_LIBS ${PoseEstimator_LIBS} ${OpenCV_LIBRARIES} ${AF_LIBS})
 

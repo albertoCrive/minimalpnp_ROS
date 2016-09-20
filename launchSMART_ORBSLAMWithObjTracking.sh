@@ -13,7 +13,7 @@ sleep 4
 
 gnome-terminal --disable-factory -e '/bin/bash -c "cd ~/catkin_ws && source devel/setup.bash && roscd usb_cam && cd launch/ && roslaunch usb_cam-test.launch " ' &
 
-COMMAND='/bin/bash -c "cd ~/catkin_ws && source devel/setup.bash && export ROS_PACKAGE_PATH=${ROS_PACKAGE_PATH}:${ORB_SLAM_INSTALL_ROOT}/Examples/ROS && cd ${ORB_SLAM_INSTALL_ROOT} && rosrun SMART_ORB_SLAM2 Mono Vocabulary/ORBvoc.txt Examples/Monocular/KITTI00-02.yaml" '
+COMMAND='/bin/bash -c "cd ~/catkin_ws && source devel/setup.bash && export ROS_PACKAGE_PATH=${ROS_PACKAGE_PATH}:${ORB_SLAM_INSTALL_ROOT}/Examples/ROS && cd ${ORB_SLAM_INSTALL_ROOT} && rosrun SMART_ORB_SLAM2 Mono Vocabulary/ORBvoc.txt ./Examples/ROS/SMART_ORB_SLAM2/SMART_ORBSLAM2_Logitec9000.yaml" '
 ORB_SLAM_INSTALL_ROOT=${ORB_SLAM_ROOT}  gnome-terminal --disable-factory -e "${COMMAND}" &
 
  

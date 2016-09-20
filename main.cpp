@@ -15,22 +15,10 @@ ros::Publisher posePublisher;
 PoseEstimator poseEstimator;
 cv::Mat undistortMapx, undistortMapy;
 
-// TODO: copied from Utilities
-void ReadIntrinsicFromOpencvFile(const std::string & fileName, cv::Matx33f * internalCalibrationMatrix, cv::Mat * distortionParameters)
-{
-    cv::FileStorage fs(fileName, cv::FileStorage::READ);
-    cv::Mat temp;
-    fs["camera_matrix"] >> temp;
-    if (temp.type() != CV_64F)
-        throw std::runtime_error("could not read internal parameters matrix! aborting...");
-    for (int i(0); i < 3; ++i) {
-        for (int j(0); j < 3; ++j)
-            (*internalCalibrationMatrix) (i, j) = temp.at < double >(i, j);
-    }
-    fs["distortion_coefficients"] >> (*distortionParameters);
-    fs.release();
-}
-// TODO these functions are duplicated from Projection.hpp
+#define MAX_NPOSES 4
+std::list<cv::Vec6f> posesSLAM2Cam;
+std::list<cv::Vec6f> posesObj2Cam;
+
 
 void RTFromPose(const cv::Vec6f &pose, cv::Mat * R, cv::Mat *t)
 {
@@ -50,7 +38,7 @@ cv::Vec6f InvertPose(const cv::Vec6f &pose)
     cv::Rodrigues(invR, invExpMap);
     invt = - invR * t;
     return cv::Vec6f(invExpMap.at<double>(0,0), invExpMap.at<double>(1,0), invExpMap.at<double>(2,0),
-                 invt.at<double>(0,0), invt.at<double>(1,0), invt.at<double>(2,0));
+                     invt.at<double>(0,0), invt.at<double>(1,0), invt.at<double>(2,0));
 }
 
 cv::Vec6f ComposePoses(const cv::Vec6f &poseIn, const cv::Vec6f & poseOut)
@@ -74,11 +62,12 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
         cv::Mat frameRGB = cv_bridge::toCvShare(msg, "bgr8")->image;
         // dirty workaround for receiving the frame pose in the header of
         // the frame !
-        cv::Vec6f poseSLAMtoCam;
+        cv::Vec6f poseSLAM2Cam;
         std::stringstream ss(msg->header.frame_id);
         for(int i=0;i<6;i++)
-            ss >> poseSLAMtoCam[i];
-        std::cout << " img received the pose is  :"<<  poseSLAMtoCam<<std::endl<<std::endl;
+            ss >> poseSLAM2Cam[i];
+        std::cout << " I should have read :"<<  ss.str()<<std::endl<<std::endl;
+        std::cout << " img received the pose is  :"<<  poseSLAM2Cam<<std::endl<<std::endl;
         ////////////////////////////////////////////////////////////////////////
         // call minimalpnp to compute the absolute pose of the box
         // TODO compute transform pose ORBSLAM -> pose of the box
@@ -89,30 +78,108 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
         cv::remap(frameRGB, frameRGBUndistorted, undistortMapx, undistortMapy, cv::INTER_LINEAR);
         cv::Matx66f outPoseCovariance;
         cv::Vec6f poseObj2Cam;
+
         std::cout << " trying to detect box ...  " <<std::endl;
         bool bTracked =  poseEstimator.EstimatePoseOnFrame(frameRGBUndistorted, &outPoseCovariance, & poseObj2Cam);
-
         std::cout << " ...another frame tracked ! " <<bTracked <<std::endl;
 
-       cv::imshow("minimal pnp->undistorted image", frameRGBUndistorted);
-       int tt = bTracked ? 0 : 5;
-       cv::waitKey(tt);
+        if(bTracked)
+        {
 
-        //////////////////////////////////////////////////////////////////////////////
-        /////// create pose from obj to SLAM
-        cv::Vec6f poseObj2SLAM = ComposePoses(poseObj2Cam, InvertPose(poseSLAMtoCam));
+            // 1. update lists of poses.
+            if(posesSLAM2Cam.size() >= MAX_NPOSES)
+                posesSLAM2Cam.pop_front();
+            posesSLAM2Cam.push_back(poseSLAM2Cam);
 
-        // ATTENTION : THE first 3 components of the orientation are the exp map, the fourth is the estimated scale !!!
-        geometry_msgs::Pose poseObjToSLAMmsg;
-        poseObjToSLAMmsg.position.x = poseObj2SLAM[3];
-        poseObjToSLAMmsg.position.y = poseObj2SLAM[4];
-        poseObjToSLAMmsg.position.z = poseObj2SLAM[5];//0.1*double (rand()) / double(RAND_MAX);
-        poseObjToSLAMmsg.orientation.x = poseObj2SLAM[0];
-        poseObjToSLAMmsg.orientation.y = poseObj2SLAM[1];
-        poseObjToSLAMmsg.orientation.z = poseObj2SLAM[2];//0.01*double (rand()) / double(RAND_MAX);
-        poseObjToSLAMmsg.orientation.w = 1;
-        posePublisher.publish(poseObjToSLAMmsg);
-        std::cout << " hope i published the pose!  :"<<  poseObjToSLAMmsg.position.z<<std::endl<<std::endl;
+            if(posesObj2Cam.size() >= MAX_NPOSES)
+                posesObj2Cam.pop_front();
+
+            posesObj2Cam.push_back(poseObj2Cam);
+
+            const int nPoses = posesObj2Cam.size();
+            std::cout << " Updated poses lists ! current size : " <<posesObj2Cam.size()<< std::endl;
+            // 2. if I have less than 2 poses it's impossible to estiamte scale --> do not send anything
+            if(nPoses < 2)
+                return;
+
+            //////////////// estimate transform ////////////////////////////////
+            // fill points arrays with points in camera ref system
+            auto itSLAM2Cam = posesSLAM2Cam.begin();
+            auto itObj2Cam = posesObj2Cam.begin();
+            cv::Mat pointsOBJ = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
+            cv::Mat pointsSLAM = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
+            int iPose(0);
+            while(iPose < nPoses)
+            {
+                cv::Mat canonicalBasis = cv::Mat::eye(3,4,CV_64FC1);
+
+                cv::Mat Rexp,R, t;
+                // points obj
+                RTFromPose((*itObj2Cam), &Rexp, &t);
+                cv::Rodrigues(Rexp, R);
+                cv::Mat ppOBJ = R * canonicalBasis + cv::repeat(t, 1, 4);
+                cv::Mat currentpOBJ = pointsOBJ(cv::Range(0,3),cv::Range(4*iPose,4*(iPose+1)));// [start,end)
+                ppOBJ.copyTo(currentpOBJ);
+
+                // points SLAM
+                RTFromPose((*itSLAM2Cam), &Rexp, &t);
+                cv::Rodrigues(Rexp, R);
+                cv::Mat ppSLAM = R * canonicalBasis + cv::repeat(t, 1, 4);
+                cv::Mat currentpSLAM = pointsSLAM(cv::Range(0,3),cv::Range(4*iPose,4*(iPose+1)));// [start,end)
+                ppSLAM.copyTo(currentpSLAM);
+
+                itObj2Cam++;
+                itSLAM2Cam++;
+                iPose++;
+            }
+
+            cv::Mat rotation, translation;
+            double scale;
+
+
+//            AlignTrajectories(pointsOBJ, pointsSLAM,  &rotation, &translation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
+
+            AlignTrajectories(pointsSLAM, pointsOBJ,  &rotation, &translation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
+
+            std::cout << " points obj : "<<std::endl << pointsOBJ<<std::endl;
+            std::cout << " points SLAM: "<<std::endl << pointsSLAM<<std::endl<<std::endl<<std::endl;
+
+            std::cout << " estimated rotation : "<<std::endl << rotation<<std::endl;
+            std::cout << " estimated transl : "<<std::endl << translation<<std::endl;
+            std::cout << " estiamted scale : " << scale<<std::endl;
+
+            // CHEKC compute residual
+            cv::Mat supposedPoints = scale * rotation * pointsSLAM + cv::repeat(translation, 1, pointsOBJ.cols);
+            cv::Mat delta;
+            absdiff(supposedPoints, pointsOBJ, delta);
+//            double mmin(0), mmax(0);
+//            minMaxLoc(delta, &mmin, &mmax);
+            std::cout<< " residual norm " << cv::norm(delta)*cv::norm(delta)/pointsOBJ.cols <<std::endl;
+
+
+//            cv::Vec6f poseObj2SLAM = ComposePoses(poseObj2Cam, InvertPose(poseSLAM2Cam));
+            cv::Mat rotationExp;
+            cv::Rodrigues(rotation, rotationExp);
+            // ATTENTION : THE first 3 components of the orientation are the exp map, the fourth is the estimated scale !!!
+            geometry_msgs::Pose poseObjToSLAMmsg;
+            poseObjToSLAMmsg.position.x = translation.at<double>(0,0);
+            poseObjToSLAMmsg.position.y = translation.at<double>(1,0);
+            poseObjToSLAMmsg.position.z = translation.at<double>(2,0);
+            poseObjToSLAMmsg.orientation.x = rotationExp.at<double>(0,0);
+            poseObjToSLAMmsg.orientation.y = rotationExp.at<double>(1,0);
+            poseObjToSLAMmsg.orientation.z = rotationExp.at<double>(2,0);
+            poseObjToSLAMmsg.orientation.w = scale;
+
+//            poseObjToSLAMmsg.position.x = poseObj2SLAM[3];
+//            poseObjToSLAMmsg.position.y = poseObj2SLAM[4];
+//            poseObjToSLAMmsg.position.z = poseObj2SLAM[5];
+//            poseObjToSLAMmsg.orientation.x = poseObj2SLAM[0];
+//            poseObjToSLAMmsg.orientation.y = poseObj2SLAM[1];
+//            poseObjToSLAMmsg.orientation.z = poseObj2SLAM[2];
+//            poseObjToSLAMmsg.orientation.w = 1;
+            posePublisher.publish(poseObjToSLAMmsg);
+            std::cout << " hope i published the pose!  :"<<  poseObjToSLAMmsg.position.z<<std::endl<<std::endl;
+        }
     }
     catch (cv_bridge::Exception& e)
     {
@@ -162,8 +229,8 @@ int main(int argc, char ** argv)
 
     // E s t a b l i s h t h i s program as a ROS node .
     ros::NodeHandle nodeHandler;
-    cv::namedWindow("minimal pnp->undistorted image");
-    cv::startWindowThread();
+    //    cv::namedWindow("minimal pnp->undistorted image");
+    //    cv::startWindowThread();
 
     posePublisher = nodeHandler.advertise<geometry_msgs::Pose>("minimalpnp/relativePose", 1000); //1000 is the max lenght of the message queue
     image_transport::ImageTransport it(nodeHandler);

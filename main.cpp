@@ -262,7 +262,7 @@ int main(int argc, char ** argv)
 
     posePublisher = nodeHandler.advertise<geometry_msgs::Pose>("minimalpnp/relativePose", 1000); //1000 is the max lenght of the message queue
     image_transport::ImageTransport it(nodeHandler);
-    image_transport::Subscriber trackedImageSubscriber = it.subscribe("/ORB_SLAM2/trackedImage", 1, imageCallback);
+    image_transport::Subscriber trackedImageSubscriber = it.subscribe("/SMART_ORB_SLAM2/trackedImage", 1, imageCallback);
 
     // Override the default ros sigint handler.
     // This must be set after the first NodeHandle is created.

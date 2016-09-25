@@ -10,6 +10,8 @@ project(minimalpnp)
 find_package(catkin REQUIRED COMPONENTS roscpp geometry_msgs cv_bridge image_transport)
 find_package(OpenCV)
 
+include_directories(${catkin_INCLUDE_DIRS})
+
 ########## PoseEstimator dependencies ################
 ##### TODO : add them to the package.xml
 

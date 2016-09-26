@@ -15,7 +15,7 @@ ros::Publisher posePublisher;
 PoseEstimator poseEstimator;
 cv::Mat undistortMapx, undistortMapy;
 
-#define MAX_NPOSES 1
+#define MAX_NPOSES 7
 std::list<cv::Vec6f> posesSLAM2Cam;
 std::list<cv::Vec6f> posesObj2Cam;
 // temp
@@ -86,6 +86,7 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
 
         if(bTracked)
         {
+	  ///////// WRITE RESULTS FOR MATLAB DEBUG
             ///////////////////////
 //            imagesSLAM.push_back(frameRGB.clone());
 //            if(imagesSLAM.size() == MAX_NPOSES)
@@ -135,55 +136,214 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
             const int nPoses = posesObj2Cam.size();
 //            std::cout << " Updated poses lists ! current size : " <<posesObj2Cam.size()<< std::endl;
 
+            if(nPoses < 2)
+                return;
             //////////////// estimate transform ////////////////////////////////
-            // fill points arrays with points in camera ref system
+            // estimate the absolute scale from displacements
             auto itSLAM2Cam = posesSLAM2Cam.begin();
             auto itObj2Cam = posesObj2Cam.begin();
-            cv::Mat pointsOBJ = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
-            cv::Mat pointsSLAM = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
             int iPose(0);
-            while(iPose < nPoses)
+            std::vector<double> absoluteScales;
+            double absoluteScale(1);
+            while(iPose < nPoses-1)
             {
-                cv::Mat canonicalBasis = cv::Mat::eye(3,4,CV_64FC1);
-
-                cv::Mat Rexp,R, t;
-
-                cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
-                RTFromPose(poseCam2Obj, &Rexp, &t);
-                cv::Rodrigues(Rexp, R);
-                cv::Mat ppOBJ = R * canonicalBasis + cv::repeat(t, 1, 4);
-                cv::Mat currentpOBJ = pointsOBJ(cv::Range(0,3),cv::Range(4*iPose,4*(iPose+1)));// [start,end)
-                ppOBJ.copyTo(currentpOBJ);
-
-                // points SLAM
-                cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
-                RTFromPose(poseCam2SLAM, &Rexp, &t);
-                cv::Rodrigues(Rexp, R);
-                cv::Mat ppSLAM = R * canonicalBasis + cv::repeat(t, 1, 4);
-                cv::Mat currentpSLAM = pointsSLAM(cv::Range(0,3),cv::Range(4*iPose,4*(iPose+1)));// [start,end)
-                ppSLAM.copyTo(currentpSLAM);
+                auto nextItSLAM = std::next(itSLAM2Cam);
+                auto nextItObj = std::next(itObj2Cam);
+                cv::Vec6f deltaPoseObj = ComposePoses(InvertPose((*itObj2Cam)), (*nextItObj));
+                cv::Vec6f deltaPoseSLAM = ComposePoses(InvertPose((*itObj2Cam)), (*nextItSLAM));
+                double n1 = (deltaPoseObj[3]*deltaPoseObj[3] +deltaPoseObj[4]*deltaPoseObj[4] + deltaPoseObj[5]*deltaPoseObj[5]);
+                double n2 = (deltaPoseSLAM[3]*deltaPoseSLAM[3] +deltaPoseSLAM[4]*deltaPoseSLAM[4] + deltaPoseSLAM[5]*deltaPoseSLAM[5]);
+		double ss = (n2 >= 1e-8 ? std::sqrt(n1/n2) : 0);
+		// just retain realistic values
+		if(ss > 1e-2 && ss < 1e2)
+                    absoluteScales.push_back(ss);
 
                 itObj2Cam++;
                 itSLAM2Cam++;
                 iPose++;
             }
+	    // take median of estimated scales !
+	    std::cout << " SCALES " << std::endl;
+	    for(auto ss : absoluteScales)
+	      std::cout << ss << " \t ";
+
+	    std::cout << std::endl;
+	    
+            if(absoluteScales.size()>0)
+            {
+                std::sort(std::begin(absoluteScales), std::end(absoluteScales));
+                if((absoluteScales.size()%2) == 0)
+                {
+                    absoluteScale = (absoluteScales[absoluteScales.size()/2-1] + absoluteScales[absoluteScales.size()/2])/2.;
+                }
+                else
+                    absoluteScale = absoluteScales[(absoluteScales.size()-1)/2];
+            }
+
+	    std::cout << " retained scale  " << absoluteScale <<  std::endl;
+	    //            absoluteScale = 1/absoluteScale;
+            // fill points arrays with points in camera ref system
+            // itSLAM2Cam = posesSLAM2Cam.begin();
+            // itObj2Cam = posesObj2Cam.begin();
+            // iPose = 0;
+            // cv::Mat pointsOBJ = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
+            // cv::Mat pointsSLAM = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
+            // while(iPose < nPoses)
+            // {
+            //     cv::Mat canonicalBasis = cv::Mat::eye(3,4,CV_64FC1);
+
+            //     cv::Mat Rexp,R, t;
+
+            //     cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
+            //     RTFromPose(poseCam2Obj, &Rexp, &t);
+            //     cv::Rodrigues(Rexp, R);
+            //     cv::Mat ppOBJ = R * absoluteScale * canonicalBasis + cv::repeat(t, 1, 4);
+            //     cv::Mat currentpOBJ = pointsOBJ(cv::Range(0,3),cv::Range(4*iPose,4*(iPose+1)));// [start,end)
+            //     ppOBJ.copyTo(currentpOBJ);
+
+            //     // points SLAM
+            //     cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
+            //     RTFromPose(poseCam2SLAM, &Rexp, &t);
+            //     cv::Rodrigues(Rexp, R);
+            //     cv::Mat ppSLAM = R * canonicalBasis + cv::repeat(t, 1, 4);
+            //     cv::Mat currentpSLAM = pointsSLAM(cv::Range(0,3),cv::Range(4*iPose,4*(iPose+1)));// [start,end)
+            //     ppSLAM.copyTo(currentpSLAM);
+
+            //     itObj2Cam++;
+            //     itSLAM2Cam++;
+            //     iPose++;
+            // }
+	    // cv::Mat rotation, translation;
+            // double scale;
+            // AlignTrajectories(pointsOBJ, pointsSLAM,  &rotation, &translation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
+          // CHEKC compute residual
+            // cv::Mat supposedPoints = scale * rotation * pointsOBJ + cv::repeat(translation, 1, pointsOBJ.cols);
+            // cv::Mat delta;
+            // absdiff(supposedPoints, pointsSLAM, delta);
+            // //            double mmin(0), mmax(0);
+            // //            minMaxLoc(delta, &mmin, &mmax);
+            // std::cout<< " residual norm " << cv::norm(delta)*cv::norm(delta)/pointsOBJ.cols <<std::endl;
+
+
+	    //////////////////////////////  EXPERIMental : TAKE MEDIAN POSE IN LIST
+
+// 	    // 1. look for pose outliers
+//             itSLAM2Cam = posesSLAM2Cam.begin();
+//             itObj2Cam = posesObj2Cam.begin();
+//             iPose = 0;
+// 	    std::vector<std::pair<float,int>> translationNorms;
+//             const cv::Mat canonicalBasis = cv::Mat::eye(3,4,CV_64FC1);
+// 	    while(iPose < nPoses)
+//             {
+//             // cv::Mat pointsOBJ = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
+//             // cv::Mat pointsSLAM = cv::Mat::zeros(3, 4*nPoses, CV_64FC1);
+
+//                 cv::Mat Rexp,R, t;
+//                 cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
+//                 RTFromPose(poseCam2Obj, &Rexp, &t);
+//                 cv::Rodrigues(Rexp, R);
+//                 cv::Mat ppOBJ = R * absoluteScale * canonicalBasis + cv::repeat(t, 1, 4);
+                
+//                 // points SLAM
+//                 cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
+//                 RTFromPose(poseCam2SLAM, &Rexp, &t);
+//                 cv::Rodrigues(Rexp, R);
+//                 cv::Mat ppSLAM = R * canonicalBasis + cv::repeat(t, 1, 4);
+                
+// 		cv::Mat curRotation, curTranslation;
+// 		double scale;
+//                 AlignTrajectories(ppOBJ, ppSLAM,  &curRotation, &curTranslation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
+//                 translationNorms.push_back(std::pair<float, int> (cv::norm(curTranslation), iPose));
+// 		itObj2Cam++; itSLAM2Cam++; iPose++;
+// 	    }
+// 	    std::cout << " translation norms :  " << std::endl;
+// 	    for(auto ss : translationNorms)
+// 	      std::cout << ss.first << " \t ";
+
+//             std::sort(std::begin(translationNorms), std::end(translationNorms));
+//             const int poseIndex = translationNorms[(translationNorms.size()-1)/2].second;
+	    
+// 	    itSLAM2Cam = posesSLAM2Cam.begin();
+//             itObj2Cam = posesObj2Cam.begin();
+//             iPose = 0;
+//             while(iPose < poseIndex)
+//             {
+//                 itObj2Cam++;
+//                 itSLAM2Cam++;
+//                 iPose++;
+//             }
+// 	    // now the pointers should point to the median pose 
+//                 cv::Mat Rexp,R, t;
+//                 cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
+//                 RTFromPose(poseCam2Obj, &Rexp, &t);
+//                 cv::Rodrigues(Rexp, R);
+//                 cv::Mat ppOBJ = R * absoluteScale * canonicalBasis + cv::repeat(t, 1, 4);
+
+//                 // points SLAM
+//                 cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
+//                 RTFromPose(poseCam2SLAM, &Rexp, &t);
+//                 cv::Rodrigues(Rexp, R);
+//                 cv::Mat ppSLAM = R * canonicalBasis + cv::repeat(t, 1, 4);
+
+//             cv::Mat rotation, translation;
+//             double scale;
+//             AlignTrajectories(ppOBJ, ppSLAM,  &rotation, &translation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
+
+
+// //            std::cout << " estimated rotation : "<<std::endl << rotation<<std::endl;
+// //            std::cout << " estimated transl : "<<std::endl << translation<<std::endl;
+//             std::cout << " estiamted scale : " << scale<<std::endl;
+
+//             // CHEKC compute residual
+//             cv::Mat supposedPoints = scale * rotation * ppOBJ + cv::repeat(translation, 1, ppOBJ.cols);
+//             cv::Mat delta;
+//             absdiff(supposedPoints, ppSLAM, delta);
+//             //            double mmin(0), mmax(0);
+//             //            minMaxLoc(delta, &mmin, &mmax);
+//             std::cout<< " residual norm " << cv::norm(delta)*cv::norm(delta)/ppOBJ.cols <<std::endl;
+    	    ///////////////////////////////////////////////////////// End Experimental
+	    ///////////////////////////////////// experimental 2 : take only last pose !
+            const cv::Mat canonicalBasis = cv::Mat::eye(3,4,CV_64FC1);
+            itSLAM2Cam = posesSLAM2Cam.begin();
+            itObj2Cam = posesObj2Cam.begin();
+            iPose = 0;
+
+            while(iPose < nPoses-1)
+            {
+                itObj2Cam++;
+                itSLAM2Cam++;
+                iPose++;
+            }
+	    // now the pointers should point to the last computed pose 
+                cv::Mat Rexp,R, t;
+                cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
+                RTFromPose(poseCam2Obj, &Rexp, &t);
+                cv::Rodrigues(Rexp, R);
+                 cv::Mat ppOBJ = R * canonicalBasis + cv::repeat(t, 1, 4);
+	
+                // points SLAM
+                cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
+                RTFromPose(poseCam2SLAM, &Rexp, &t);
+                cv::Rodrigues(Rexp, R);
+                cv::Mat ppSLAM = R * canonicalBasis /absoluteScale + cv::repeat(t, 1, 4);
 
             cv::Mat rotation, translation;
             double scale;
-            AlignTrajectories(pointsOBJ, pointsSLAM,  &rotation, &translation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
+            AlignTrajectories(ppOBJ, ppSLAM,  &rotation, &translation, &scale); // pointsSLAM = s*R*pointsOBJ + translation
 
 //            std::cout << " estimated rotation : "<<std::endl << rotation<<std::endl;
 //            std::cout << " estimated transl : "<<std::endl << translation<<std::endl;
             std::cout << " estiamted scale : " << scale<<std::endl;
 
             // CHEKC compute residual
-            cv::Mat supposedPoints = scale * rotation * pointsOBJ + cv::repeat(translation, 1, pointsOBJ.cols);
+            cv::Mat supposedPoints = scale * rotation * ppOBJ + cv::repeat(translation, 1, ppOBJ.cols);
             cv::Mat delta;
-            absdiff(supposedPoints, pointsSLAM, delta);
+            absdiff(supposedPoints, ppSLAM, delta);
             //            double mmin(0), mmax(0);
             //            minMaxLoc(delta, &mmin, &mmax);
-            std::cout<< " residual norm " << cv::norm(delta)*cv::norm(delta)/pointsOBJ.cols <<std::endl;
+            std::cout<< " residual norm " << cv::norm(delta)/ppOBJ.cols <<std::endl;
 
+	    ///////////////////////////////////////////////////////////////////////////////////
 
             //            cv::Vec6f poseObj2SLAM = ComposePoses(poseObj2Cam, InvertPose(poseSLAM2Cam));
             cv::Mat rotationExp;
@@ -196,6 +356,7 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
             poseObjToSLAMmsg.orientation.x = rotationExp.at<double>(0,0);
             poseObjToSLAMmsg.orientation.y = rotationExp.at<double>(1,0);
             poseObjToSLAMmsg.orientation.z = rotationExp.at<double>(2,0);
+
             poseObjToSLAMmsg.orientation.w = scale;
 
             //            poseObjToSLAMmsg.position.x = poseObj2SLAM[3];
@@ -207,6 +368,11 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
             //            poseObjToSLAMmsg.orientation.w = 1;
             posePublisher.publish(poseObjToSLAMmsg);
             std::cout << " hope i published the pose!  :"<<  poseObjToSLAMmsg.position.z<<std::endl<<std::endl;
+	    char key = cv::waitKey(200);
+            if (key ==' ')
+                key = cv::waitKey(0);
+            if (key ==27)
+                exit(0);
         }
     }
     catch (cv_bridge::Exception& e)

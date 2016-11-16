@@ -17,7 +17,7 @@ MINIMALPNP_ROS_LAUNCH='/bin/bash -c "cd ${CATKIN_WS} && source devel/setup.bash 
 
 ORBSLAM_LAUNCH='/bin/bash -c "cd ${CATKIN_WS} && source devel/setup.bash && export ROS_PACKAGE_PATH=${ROS_PACKAGE_PATH}:${ORB_SLAM_INSTALL_ROOT}/Examples/ROS && cd ${ORB_SLAM_INSTALL_ROOT} && rosrun SMART_ORB_SLAM2 Mono Vocabulary/ORBvoc.txt ./Examples/ROS/SMART_ORB_SLAM2/SMART_ORBSLAM2_Logitec9000.yaml" '
 
-VIEWER_LAUNCH='/bin/bash -c "sleep 10 && rosrun image_view image_view image:=/SMART_ORB_SLAM2/trackedImageWithBox" '
+VIEWER_LAUNCH='/bin/bash -c "sleep 10 && rosrun image_view image_view image:=/SMART_ORB_SLAM2/trackedImageWithBox autosize:=true" '
 
 
 #--disable-factory needed for getting pid of background terminal

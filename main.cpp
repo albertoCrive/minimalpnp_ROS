@@ -20,12 +20,17 @@ std::list<cv::Vec6f> posesSLAM2Cam;
 std::list<cv::Vec6f> posesObj2Cam;
 // temp
 std::vector<cv::Mat> imagesSLAM;
+const float distForManualCalibrationMeters=0.297;
 
 bool bScaleManuallySet = false;
-double absoluteScale =1;
+double absoluteScale = -1;
 cv::Mat cameraSLAMCenter1;
 cv::Mat cameraSLAMCenter2;
+int nMinimumPartForAcceptingPose = 4;
+int nMinimumPartComputingScale = 4;
 
+
+cv::Vec6f poseSLAM2Cam;
 
 
 void RTFromPose(const cv::Vec6f &pose, cv::Mat * R, cv::Mat *t)
@@ -78,6 +83,34 @@ cv::Mat ComputeCameraCenter(const cv::Vec6f &poseWorldToCam)
     return cameraCenter;
 }
 
+void PublishPose(const cv::Mat& translation, const cv::Mat& rotationExp, const float &scale)
+{
+  // ATTENTION : THE first 3 components of the orientation are the exp map, the fourth is the estimated scale !!!
+  geometry_msgs::Pose poseObjToSLAMmsg;
+  if(!translation.data || ! rotationExp.data)
+    {
+      poseObjToSLAMmsg.position.x = NAN;
+      poseObjToSLAMmsg.position.y = NAN;
+      poseObjToSLAMmsg.position.z = NAN;
+      poseObjToSLAMmsg.orientation.x = NAN;
+      poseObjToSLAMmsg.orientation.y = NAN;
+      poseObjToSLAMmsg.orientation.z = NAN;
+      poseObjToSLAMmsg.orientation.w = NAN;
+    }
+  else
+    {
+      poseObjToSLAMmsg.position.x = translation.at<double>(0,0);
+      poseObjToSLAMmsg.position.y = translation.at<double>(1,0);
+      poseObjToSLAMmsg.position.z = translation.at<double>(2,0);
+      poseObjToSLAMmsg.orientation.x = rotationExp.at<double>(0,0);
+      poseObjToSLAMmsg.orientation.y = rotationExp.at<double>(1,0);
+      poseObjToSLAMmsg.orientation.z = rotationExp.at<double>(2,0);
+      poseObjToSLAMmsg.orientation.w = scale;
+    }
+	    
+  posePublisher.publish(poseObjToSLAMmsg);
+}
+
 
 void imageCallback(const sensor_msgs::ImageConstPtr& msg)
 {
@@ -86,7 +119,6 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
         cv::Mat frameRGB = cv_bridge::toCvShare(msg, "bgr8")->image;
         // dirty workaround for receiving the frame pose in the header of
         // the frame !
-        cv::Vec6f poseSLAM2Cam;
         std::stringstream ss(msg->header.frame_id);
         for(int i=0;i<6;i++)
             ss >> poseSLAM2Cam[i];
@@ -105,166 +137,135 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
 
         int nEmployedParts =  poseEstimator.EstimatePoseOnFrame(frameRGBUndistorted, &outPoseCovariance, & poseObj2Cam);
         std::cout << " ...another frame tracked ! number of detected parts : " <<nEmployedParts <<std::endl;
+	std::cout << "SCALE : " << absoluteScale << " "  << bScaleManuallySet << " "  << nMinimumPartForAcceptingPose <<std::endl;
 
-        if(nEmployedParts >=4)
-        {
-            //////////////// update lists of poses////////////////////////////////
-            if(posesSLAM2Cam.size() >= MAX_NPOSES)
-                posesSLAM2Cam.pop_front();
-            if(posesObj2Cam.size() >= MAX_NPOSES)
-                posesObj2Cam.pop_front();
+	if(nEmployedParts >= nMinimumPartComputingScale)
+	      {
+			    std::cout << "I need to automatically estimate the scale  !" <<std::endl;
 
-            posesSLAM2Cam.push_back(poseSLAM2Cam);
-            posesObj2Cam.push_back(poseObj2Cam);
+		//////////////////BEGIN SCALE ESTIMATION //////////////////////////////////////
+		////////////////////////////////////////////////////////////////////////////
+	  
+		//////////////// update lists of poses////////////////////////////////
+		if(posesSLAM2Cam.size() >= MAX_NPOSES)
+		  posesSLAM2Cam.pop_front();
+		if(posesObj2Cam.size() >= MAX_NPOSES)
+		  posesObj2Cam.pop_front();
 
-            const int nPoses = posesObj2Cam.size();
-            // if I can not estimate the scale then return
-            if(nPoses < 2)
-                return;
+		posesSLAM2Cam.push_back(poseSLAM2Cam);
+		posesObj2Cam.push_back(poseObj2Cam);
 
-            // if too big displacement between 2 last poses then re-initialize poses list
-            float maxDisplacementMeters = 0.7;
-            auto itObj = posesObj2Cam.end(); itObj--;
-            auto itObjPrev = std::prev(itObj);
-            cv::Mat centerObj = ComputeCameraCenter((*itObj));
-            cv::Mat centerObjPrev = ComputeCameraCenter((*itObjPrev));
-            if(cv::norm(centerObj - centerObjPrev) > maxDisplacementMeters)
-            {
-                posesSLAM2Cam.clear();
-                posesObj2Cam.clear();
-                posesSLAM2Cam.push_back(poseSLAM2Cam);
-                posesObj2Cam.push_back(poseObj2Cam);
-                return;
-            }
+		const int nPoses = posesObj2Cam.size();
+		// if I can not estimate the scale then return
+		if(nPoses < 3)
+		  {
+		    PublishPose( cv::Mat(), cv::Mat(), NAN);
+		    return;
+		  }
+	    
+		// if too big displacement between 2 last poses then re-initialize poses list
+		// TODO keep this code ???????????????
+		float maxDisplacementMeters = 0.7;
+		auto itObj = posesObj2Cam.end(); itObj--;
+		auto itObjPrev = std::prev(itObj);
+		cv::Mat centerObj = ComputeCameraCenter((*itObj));
+		cv::Mat centerObjPrev = ComputeCameraCenter((*itObjPrev));
+		if(cv::norm(centerObj - centerObjPrev) > maxDisplacementMeters)
+		  {
+		    posesSLAM2Cam.clear();
+		    posesObj2Cam.clear();
+		    posesSLAM2Cam.push_back(poseSLAM2Cam);
+		    posesObj2Cam.push_back(poseObj2Cam);
+		
+		    return;
+		  }
 
+		//////////////// estimate scale transform ////////////////////////////////
+		auto itSLAM2Cam = posesSLAM2Cam.begin();
+		auto itObj2Cam = posesObj2Cam.begin();
+		int iPose(0);
+		if (!bScaleManuallySet)
+		  {
+		    float furthestScale = 0.0;
+		    float maxDistance = 0.0;
+		    while(iPose < nPoses-1)
+		      {
+			auto nextItSLAM = std::next(itSLAM2Cam);
+			auto nextItObj = std::next(itObj2Cam);
+			while(nextItObj != posesObj2Cam.end())
+			  {
 
-            //////////////// estimate scale transform ////////////////////////////////
-            auto itSLAM2Cam = posesSLAM2Cam.begin();
-            auto itObj2Cam = posesObj2Cam.begin();
-            int iPose(0);
-            if (!bScaleManuallySet)
-            {
-                float furthestScale = 0.0;
-                float maxDistance = 0.0;
-                while(iPose < nPoses-1)
-                {
-                    auto nextItSLAM = std::next(itSLAM2Cam);
-                    auto nextItObj = std::next(itObj2Cam);
-                    while(nextItObj != posesObj2Cam.end())
-                    {
+			    cv::Mat centerObj1 = ComputeCameraCenter((*itObj2Cam));
+			    cv::Mat centerObj2 = ComputeCameraCenter((*nextItObj));
+			    float deltatObj = cv::norm(centerObj1 - centerObj2);
 
-                        cv::Mat centerObj1 = ComputeCameraCenter((*itObj2Cam));
-                        cv::Mat centerObj2 = ComputeCameraCenter((*nextItObj));
-                        float deltatObj = cv::norm(centerObj1 - centerObj2);
+			    cv::Mat centerSLAM1 = ComputeCameraCenter((*itSLAM2Cam));
+			    cv::Mat centerSLAM2 = ComputeCameraCenter((*nextItSLAM));
+			    float deltatSLAM = cv::norm(centerSLAM1 - centerSLAM2);
 
-                        cv::Mat centerSLAM1 = ComputeCameraCenter((*itSLAM2Cam));
-                        cv::Mat centerSLAM2 = ComputeCameraCenter((*nextItSLAM));
-                        float deltatSLAM = cv::norm(centerSLAM1 - centerSLAM2);
+			    float ss = deltatSLAM > 1e-3 ?  deltatObj / deltatSLAM : 1.;
+			    if(deltatSLAM > maxDistance && deltatSLAM > 1e-3)
+			      {
+				// std::cout << "setting furthest scale ! old : " << maxDistance << " ; new : " << deltatObj << "; scale : " << ss <<std::endl;
+				maxDistance = deltatSLAM;
+				furthestScale = ss;
+			      }
+			    nextItSLAM++;
+			    nextItObj++;
+			  }
+			itObj2Cam++;
+			itSLAM2Cam++;
+			iPose++;
+		      }
+		    if(furthestScale != 0.)
+		      absoluteScale = furthestScale;
+		    else
+		      {
+			std::cout<< " Failed estimating the scale :(" <<std::endl;
+			PublishPose( cv::Mat(), cv::Mat(), NAN);
+			return;
+		      }
+		  }
+	      }
+	
 
-                        float ss = deltatSLAM > 1e-3 ?  deltatObj / deltatSLAM : 1.;
-                        if(deltatSLAM > maxDistance && deltatSLAM > 1e-3)
-                        {
-                            // std::cout << "setting furthest scale ! old : " << maxDistance << " ; new : " << deltatObj << "; scale : " << ss <<std::endl;
-                            maxDistance = deltatSLAM;
-                            furthestScale = ss;
-                        }
-                        nextItSLAM++;
-                        nextItObj++;
-                    }
-                    itObj2Cam++;
-                    itSLAM2Cam++;
-                    iPose++;
-                }
-                if(furthestScale != 0.)
-                    absoluteScale = furthestScale;
-                else
-                {
-                    std::cout<< " Failed estimating the scale :(" <<std::endl;
-                    return;
-                }
-            }
+        //////////////////END SCALE ESTIMATION //////////////////////////////////////
+   	  ////////////////////////////////////////////////////////////////////////////
 
-
-            // 	itSLAM2Cam = posesSLAM2Cam.begin();
-            // 	itObj2Cam = posesObj2Cam.begin();
-            //  std::vector<double> absoluteScales;
-            //   ///////////////////////////////////////
-            //     while(iPose < nPoses-1)
-            //     {
-            //         auto nextItSLAM = std::next(itSLAM2Cam);
-            //         auto nextItObj = std::next(itObj2Cam);
-
-            //         // OBSOLETE
-            //         // cv::Vec6f deltaPoseObj = ComposePoses(InvertPose((*itObj2Cam)), (*nextItObj));
-            //         // cv::Vec6f deltaPoseSLAM = ComposePoses(InvertPose((*itSLAM2Cam)), (*nextItSLAM));
-            //         // double n1 = (deltaPoseObj[3]*deltaPoseObj[3] +deltaPoseObj[4]*deltaPoseObj[4] + deltaPoseObj[5]*deltaPoseObj[5]);
-            //         // double n2 = (deltaPoseSLAM[3]*deltaPoseSLAM[3] +deltaPoseSLAM[4]*deltaPoseSLAM[4] + deltaPoseSLAM[5]*deltaPoseSLAM[5]);
-            //         // double ssOLD = (n2 >= 1e-8 ? std::sqrt(n1/n2) : 0);
-
-            //         /////////////////////////////////////////////////////////
-
-            //         cv::Mat centerObj1 = ComputeCameraCenter((*itObj2Cam));
-            //         cv::Mat centerObj2 = ComputeCameraCenter((*nextItObj));
-            //         float deltatObj = cv::norm(centerObj1 - centerObj2);
-
-            //         cv::Mat centerSLAM1 = ComputeCameraCenter((*itSLAM2Cam));
-            //         cv::Mat centerSLAM2 = ComputeCameraCenter((*nextItSLAM));
-            //         float deltatSLAM = cv::norm(centerSLAM1 - centerSLAM2);
-
-            //         float ss = deltatObj > 1e-1 ? deltatSLAM / deltatObj : 1.;
-            //         ///////////////////////////////////////////////////
-            //         if(ss > 1e-2 && ss < 1e2 && deltatObj)
-            //             absoluteScales.push_back(ss);
-
-            //         itObj2Cam++;
-            //         itSLAM2Cam++;
-            //         iPose++;
-            //     }
-            //     // take median of estimated scales !
-            //    std::cout << " SCALES " << std::endl;
-            //    for(auto ss : absoluteScales)
-            //        std::cout << ss << " \t ";
-
-            //     std::cout << std::endl;
-
-            //     if(absoluteScales.size()>0)
-            //     {
-            //         std::sort(std::begin(absoluteScales), std::end(absoluteScales));
-            //         if((absoluteScales.size()%2) == 0)
-            //         {
-            //             absoluteScale = (absoluteScales[absoluteScales.size()/2-1] + absoluteScales[absoluteScales.size()/2])/2.;
-            //         }
-            //         else
-            //             absoluteScale = absoluteScales[(absoluteScales.size()-1)/2];
-            //     }
-            //     else
-            //         absoluteScale = 1.0;
-            // }
-
+        if(absoluteScale > 1e-2 && absoluteScale < 10 && nEmployedParts >= nMinimumPartForAcceptingPose)
+	  {
+	    std::cout << "scale seems ok I compute abs pose !" <<std::endl;
+	    
             const cv::Mat canonicalBasis = cv::Mat::eye(3,4,CV_64FC1);
-            itSLAM2Cam = posesSLAM2Cam.begin();
-            itObj2Cam = posesObj2Cam.begin();
-            iPose = 0;
 
-            std::string method = bScaleManuallySet ? " manually set " : " automatically estimated";
-            std::cout << " retained scale  " << absoluteScale <<  ",   " << method <<std::endl;
+            // auto itSLAM2Cam = posesSLAM2Cam.begin();
+            // auto itObj2Cam = posesObj2Cam.begin();
+            // int iPose = 0;
+            // std::string method = bScaleManuallySet ? " manually set " : " automatically estimated";
+            // std::cout << " retained scale  " << absoluteScale <<  ",   " << method <<std::endl;
 
-            while(iPose < nPoses-1)
-            {
-                itObj2Cam++;
-                itSLAM2Cam++;
-                iPose++;
-            }
-            // now the pointers should point to the last computed pose
+            // while(iPose < nPoses-1)
+            // {
+            //     itObj2Cam++;
+            //     itSLAM2Cam++;
+            //     iPose++;
+            // }
+            // // now the pointers should point to the last computed pose
+            
+            // cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
+            // // points SLAM
+            // cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
+
+	    ///////////////////////
+            cv::Vec6f poseCam2Obj = InvertPose(poseObj2Cam);
+	    cv::Vec6f poseCam2SLAM = InvertPose(poseSLAM2Cam);
+	    ////////////////////////////////////
             cv::Mat Rexp,R, t;
-            cv::Vec6f poseCam2Obj = InvertPose((*itObj2Cam));
             RTFromPose(poseCam2Obj, &Rexp, &t);
             cv::Rodrigues(Rexp, R);
             cv::Mat ppOBJ = R * canonicalBasis * absoluteScale + cv::repeat(t, 1, 4);
 
-            // points SLAM
-            cv::Vec6f poseCam2SLAM = InvertPose((*itSLAM2Cam));
-            RTFromPose(poseCam2SLAM, &Rexp, &t);
+		RTFromPose(poseCam2SLAM, &Rexp, &t);
             cv::Rodrigues(Rexp, R);
             cv::Mat ppSLAM = R * canonicalBasis + cv::repeat(t, 1, 4);
 
@@ -280,27 +281,28 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
             //            double mmin(0), mmax(0);
             //            minMaxLoc(delta, &mmin, &mmax);
             //std::cout<< " residual norm " << cv::norm(delta)/ppOBJ.cols <<std::endl;
-
             ///////////////////////////////////////////////////////////////////////////////////
-
             //            cv::Vec6f poseObj2SLAM = ComposePoses(poseObj2Cam, InvertPose(poseSLAM2Cam));
             cv::Mat rotationExp;
             cv::Rodrigues(rotation, rotationExp);
-            // ATTENTION : THE first 3 components of the orientation are the exp map, the fourth is the estimated scale !!!
-            geometry_msgs::Pose poseObjToSLAMmsg;
-            poseObjToSLAMmsg.position.x = translation.at<double>(0,0);
-            poseObjToSLAMmsg.position.y = translation.at<double>(1,0);
-            poseObjToSLAMmsg.position.z = translation.at<double>(2,0);
-            poseObjToSLAMmsg.orientation.x = rotationExp.at<double>(0,0);
-            poseObjToSLAMmsg.orientation.y = rotationExp.at<double>(1,0);
-            poseObjToSLAMmsg.orientation.z = rotationExp.at<double>(2,0);
+	    PublishPose( translation, rotationExp, scale);
+	    
 
-            poseObjToSLAMmsg.orientation.w = scale;
-            posePublisher.publish(poseObjToSLAMmsg);
+            // ATTENTION : THE first 3 components of the orientation are the exp map, the fourth is the estimated scale !!!
+            // geometry_msgs::Pose poseObjToSLAMmsg;
+            // poseObjToSLAMmsg.position.x = translation.at<double>(0,0);
+            // poseObjToSLAMmsg.position.y = translation.at<double>(1,0);
+            // poseObjToSLAMmsg.position.z = translation.at<double>(2,0);
+            // poseObjToSLAMmsg.orientation.x = rotationExp.at<double>(0,0);
+            // poseObjToSLAMmsg.orientation.y = rotationExp.at<double>(1,0);
+            // poseObjToSLAMmsg.orientation.z = rotationExp.at<double>(2,0);
+            // poseObjToSLAMmsg.orientation.w = scale;
+            // posePublisher.publish(poseObjToSLAMmsg);
         }// end of if (tracked)
 
-
-        char key = cv::waitKey(50);
+	// cv::imshow("minimal pnp->undistorted image", frameRGB );
+	
+        char key = cv::waitKey(30);
         if (key ==' ')
             key = cv::waitKey(0);
         else if (key ==27)
@@ -320,7 +322,7 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
             std::cout << " setting first camera center : " << std::endl;
             cameraSLAMCenter1 = ComputeCameraCenter(poseSLAM2Cam);
             std::cout << " camera center set at : " <<cameraSLAMCenter1.t() << std::endl;
-            std::cout << " Now move the camera of 50 cm and press q" <<std::endl;
+            std::cout << " Now move the camera of " << distForManualCalibrationMeters << " m and press q" <<std::endl;
         }
         else if (key == 'q')
         {
@@ -330,9 +332,8 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
             {
                 std::cout << " setting second camera center and scale : " << std::endl;
                 cameraSLAMCenter2 = ComputeCameraCenter(poseSLAM2Cam);
-                absoluteScale = 0.5/cv::norm(cameraSLAMCenter1 - cameraSLAMCenter2);
+                absoluteScale = distForManualCalibrationMeters/cv::norm(cameraSLAMCenter1 - cameraSLAMCenter2);
                 bScaleManuallySet = true;
-
                 std::cout << " second camera center set at : " <<cameraSLAMCenter2.t() << std::endl;
                 std::cout << " scale manually set at : " << absoluteScale << std::endl;
             }
@@ -341,6 +342,8 @@ void imageCallback(const sensor_msgs::ImageConstPtr& msg)
         {
             std::cout << "automatically estimating the scale "<<std::endl;
             bScaleManuallySet = false;
+            absoluteScale = -1;
+            PublishPose( cv::Mat(), cv::Mat(), NAN);
         }
     }
     catch (cv_bridge::Exception& e)
@@ -368,6 +371,41 @@ void mySigintHandler(int sig)
 
 
 
+void ButtonSetP(int state, void* userdata)
+{
+  std::cout << " setting first camera center : " << std::endl;
+  cameraSLAMCenter1 = ComputeCameraCenter(poseSLAM2Cam);
+  std::cout << " camera center set at : " <<cameraSLAMCenter1.t() << std::endl;
+  return;
+}
+
+void ButtonSetQ(int state, void* userdata)
+{
+  if(!cameraSLAMCenter1.data)
+    std::cout << "you first have to set the first camera center. Press p"<<std::endl;
+  else
+    {
+      std::cout << " setting second camera center and scale : " << std::endl;
+      cameraSLAMCenter2 = ComputeCameraCenter(poseSLAM2Cam);
+      absoluteScale = distForManualCalibrationMeters/cv::norm(cameraSLAMCenter1 - cameraSLAMCenter2);
+      bScaleManuallySet = true;
+      std::cout << " second camera center set at : " <<cameraSLAMCenter2.t() << std::endl;
+      std::cout << " scale manually set at : " << absoluteScale << std::endl;
+    }
+  return;
+}
+
+void ButtonReset(int state, void* userdata)
+{
+  std::cout << "automatically estimating the scale "<<std::endl;
+  bScaleManuallySet = false;
+  absoluteScale = -1;
+  PublishPose( cv::Mat(), cv::Mat(), NAN);
+  return;
+}
+
+
+
 int main(int argc, char ** argv)
 {
 
@@ -391,9 +429,15 @@ int main(int argc, char ** argv)
 
     // E s t a b l i s h t h i s program as a ROS node .
     ros::NodeHandle nodeHandler;
-    //    cv::namedWindow("minimal pnp->undistorted image");
-    //    cv::startWindowThread();
+       // cv::namedWindow("minimal pnp->undistorted image");
 
+       cv::createButton("set P1", ButtonSetP, NULL, CV_PUSH_BUTTON, 0);       
+       cv::createButton("Set P2=P1+dist", ButtonSetQ, NULL, CV_PUSH_BUTTON, 0);       
+       cv::createButton("reset scale", ButtonReset, NULL, CV_PUSH_BUTTON, 0);       
+       // cv::startWindowThread();
+
+
+       
     posePublisher = nodeHandler.advertise<geometry_msgs::Pose>("minimalpnp/relativePose", 1000); //1000 is the max lenght of the message queue
     image_transport::ImageTransport it(nodeHandler);
     image_transport::Subscriber trackedImageSubscriber = it.subscribe("/SMART_ORB_SLAM2/trackedImage", 1, imageCallback);
